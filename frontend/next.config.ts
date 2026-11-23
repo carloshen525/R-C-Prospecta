@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
@@ -11,6 +10,15 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  async rewrites() {
+    const backendHost = process.env.INTERNAL_BACKEND_HOST || "backend";
+    return [
+      {
+        source: "/api/v1/:path*",
+        destination: `http://${backendHost}:8000/api/v1/:path*`,
+      },
+    ];
   },
 };
 
