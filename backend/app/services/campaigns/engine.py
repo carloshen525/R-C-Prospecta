@@ -35,7 +35,7 @@ class CampaignExecutionEngine:
         if target_date is None:
             target_date = get_now_in_brazil().date()
 
-        limit_val = settings.DAILY_CONTACT_LIMIT
+        limit_val = min(int(getattr(settings, "DAILY_CONTACT_LIMIT", 20)), 20)
         try:
             from app.models.setting import Setting
             s_lim = self.db.query(Setting).filter(Setting.key == "DAILY_CONTACT_LIMIT").first()
