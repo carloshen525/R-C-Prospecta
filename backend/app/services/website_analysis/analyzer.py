@@ -75,6 +75,18 @@ class WebsiteAnalysisService:
                     if 4 < len(li_text) < 60 and not any(skip in li_text.lower() for skip in ["home", "contato", "sobre", "login", "menu", "política", "termos"]):
                         services.append(li_text)
 
+                # Identifica especialidades e tratamentos odontológicos específicos no site
+                DENTAL_KEYWORDS = [
+                    "implante", "prótese", "alinhador", "invisalign", "ortodontia", "aparelho invisível",
+                    "aparelho", "estética dental", "clareamento", "lente de contato", "facetas",
+                    "harmonização", "canal", "endodontia", "odontopediatria", "reabilitação oral"
+                ]
+                combined_text = f"{title} {meta_desc} {' '.join(headings)} {sample_about}".lower()
+                detected_specialties = []
+                for kw in DENTAL_KEYWORDS:
+                    if kw in combined_text and kw not in detected_specialties:
+                        detected_specialties.append(kw.capitalize())
+
                 # Se não encontrou em li, usa os headings como serviços principais
                 if not services and headings:
                     services = headings[:4]
@@ -90,6 +102,7 @@ class WebsiteAnalysisService:
                     "about_summary": sample_about,
                     "summary": summary[:300],
                     "services": services[:6],
+                    "detected_specialties": detected_specialties[:5],
                     "products": [s for s in services if any(w in s.lower() for w in ["plano", "produto", "kit", "aparelho", "implante", "prótese"])][:4]
                 }
 

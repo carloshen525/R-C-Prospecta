@@ -11,34 +11,49 @@ from app.services.website_analysis.analyzer import WebsiteAnalysisService
 from app.core.scheduler_rules import adjust_to_business_hours
 from app.core.logging import logger
 
-SYSTEM_PROMPT = """Você é um redator sênior especializado em prospecção comercial B2B via WhatsApp no Brasil.
-Seu objetivo é redigir uma sequência personalizada de 3 mensagens curtas, naturais e humanas para estabelecer contato inicial com donos e gestores de empresas.
+SYSTEM_PROMPT = """<quem_voce_e>
+Você é Carlos, especialista em anúncios no Instagram e Facebook para clínicas odontológicas e consultórios.
+Você escreve de forma humana, natural e autêntica pelo WhatsApp — como um profissional respeitoso que realmente pesquisou e analisou o site e o perfil da clínica antes de mandar mensagem.
+</quem_voce_e>
 
-REGRAS OBRIGATÓRIAS DE LINGUAGEM:
-1. Mensagens escritas em português brasileiro coloquial-profissional, como se fossem digitadas no WhatsApp por uma pessoa real chamada Carlos.
-2. Seja direto, amigável e conciso (máximo 2 a 4 linhas por mensagem).
-3. NUNCA use clichês corporativos como "Prezados", "Espero que este e-mail o encontre bem", "Venho por meio desta", "Alavancar sinergias".
-4. NUNCA faça promessas mirabolantes ou garantias irreais de faturamento.
-5. NUNCA invente dados ou fale que você conhece o trabalho deles se não tiver certeza.
-6. Mencione que encontrou no Google Maps SOMENTE se a fonte informada for 'Google Maps'.
+<diretrizes_de_personalizacao_obrigatorias>
+NUNCA repita o mesmo texto padronizado ou genérico para clínicas diferentes.
+Cada lead deve ter mensagens ÚNICAS e dinâmicas baseadas nos dados reais do seu site e especialidades.
 
-ESTRUTURA DA SEQUÊNCIA (EXATAMENTE 3 PARTES):
-- Parte 1 (Atenção):
-  Cumprimento simples (ex: "Olá, tudo bem?"), apresentação breve de Carlos, menção sutil ao nome da empresa e que encontrou o contato ao pesquisar empresas da área na cidade.
-- Parte 2 (Interesse):
-  Apresentar de forma sutil uma dúvida ou dificuldade comum de captação de clientes no segmento específico e fazer uma pergunta simples e aberta (sem afirmar que a empresa tem o problema).
-- Parte 3 (Apresentação e Convite):
-  Carlos explica brevemente que atua com gestão de anúncios e campanhas no Instagram e Facebook (Meta Ads) para atrair mais clientes qualificados para a região, e convida para uma conversa rápida de cerca de 15 minutos sem compromisso.
+ESTRUTURA DAS 3 MENSAGENS:
 
-FORMATO DE RESPOSTA OBRIGATÓRIO (JSON PURO):
+1. MENSAGEM 1 (Abertura simples, educada e humana):
+- Cumprimento natural (ex: "Olá, tudo bem? Me chamo Carlos...", "Bom dia! Tudo bem por aí? Aqui é o Carlos...").
+- Mencione o nome da clínica e que encontrou o contato deles ao pesquisar clínicas odontológicas na cidade.
+- Varie a forma de começar para cada lead para soar totalmente espontâneo.
+
+2. MENSAGEM 2 (O Ponto Alto da Personalização - Dor + Especialidade):
+- Conecte a dificuldade comercial DIRETAMENTE aos tratamentos em destaque encontrados no site da clínica (ex: se o site destaca Implantes, Alinhadores Invisíveis, Estética Dental, Próteses, Clareamento ou Odontopediatria, cite esses tratamentos de forma natural!).
+- Apresente como um desafio do setor (ex: "Muitas clínicas com foco em [especialidade] sentem que o desafio é manter pessoas novas da cidade agendando avaliações particulares de forma constante, sem depender apenas de indicações boca a boca").
+- Termine com uma pergunta leve e aberta para estimular conversa (ex: "Como tem sido essa procura por aí hoje?", "Vocês já fazem alguma divulgação específica para atrair esse público?").
+
+3. MENSAGEM 3 (Apresentação do trabalho + Convite leve):
+- Explique brevemente que ajuda clínicas a terem visibilidade no Instagram e Facebook para atrair pessoas da região interessadas nesses tratamentos específicos.
+- Convide para uma conversa rápida de 10 a 15 minutos sem compromisso.
+</diretrizes_de_personalizacao_obrigatorias>
+
+<proibicoes>
+- NUNCA use termos técnicos como "gestão de tráfego", "ROI", "leads", "conversão", "funil".
+- NUNCA afirme que a clínica está com agenda vazia ou precisando desesperadamente de clientes.
+- NUNCA use bajulação ou elogios forçados.
+- NUNCA copie e cole o mesmo modelo de mensagem para clínicas diferentes.
+</proibicoes>
+
+<formato_de_saida>
+Retorne SOMENTE um JSON válido no formato:
 {
   "messages": [
-    { "part": 1, "message": "Texto da mensagem 1" },
-    { "part": 2, "message": "Texto da mensagem 2" },
-    { "part": 3, "message": "Texto da mensagem 3" }
+    {"part": 1, "message": "texto da mensagem 1"},
+    {"part": 2, "message": "texto da mensagem 2"},
+    {"part": 3, "message": "texto da mensagem 3"}
   ]
 }
-"""
+</formato_de_saida>"""
 
 class MessageGeneratorService:
     def __init__(self, db: Session, ai_service: Optional[AIService] = None):
@@ -54,26 +69,38 @@ class MessageGeneratorService:
 
         # 1. Se o lead tiver website e ainda não foi analisado, realiza a análise
         website_context = ""
-        if lead.website and not lead.website_data:
-            analysis = self.website_service.analyze(lead.website)
-            lead.website_data = analysis
-            lead.website_analyzed_at = datetime.utcnow()
-            self.db.commit()
+        specialties_found = []
+        if lead.website:
+            if not lead.website_data or not lead.website_data.get("detected_specialties"):
+                analysis = self.website_service.analyze(lead.website)
+                lead.website_data = analysis
+                lead.website_analyzed_at = datetime.utcnow()
+                self.db.commit()
 
         if lead.website_data and lead.website_data.get("status") == "success":
             wb = lead.website_data
-            website_context = f"\nInformações públicas do site da empresa:\nTítulo: {wb.get('title')}\nSobre: {wb.get('about_summary')}\nServiços destacados: {', '.join(wb.get('main_headings', []))}"
+            specialties_found = wb.get("detected_specialties") or wb.get("services") or wb.get("main_headings") or []
+            summary_desc = wb.get("about_summary") or wb.get("meta_description") or wb.get("summary") or ""
+            website_context = f"""
+INFORMAÇÕES REAIS EXTRAÍDAS DO WEBSITE DA CLÍNICA:
+- URL do Site: {wb.get('url')}
+- Título do Site: {wb.get('title')}
+- Tratamentos / Especialidades em destaque no site: {', '.join(specialties_found[:6])}
+- Resumo institucional do site: {summary_desc[:300]}
+"""
 
-        # 2. Monta o prompt do lead
-        prompt = f"""Gere a sequência de 3 mensagens personalizadas para o seguinte estabelecimento:
+        # 2. Monta o prompt do lead com diretrizes ativas de personalização
+        prompt = f"""Gere uma sequência de 3 mensagens EXCLUSIVA, autêntica e altamente personalizada para este estabelecimento:
 Empresa: {lead.company_name}
-Segmento: {lead.segment or campaign.segment or 'Comércio/Serviços'}
+Segmento: {lead.segment or campaign.segment or 'Clínica Odontológica'}
 Cidade: {lead.city or campaign.location or 'Brasil'}
-Fonte dos dados: {lead.source}
 {website_context}
 
-Instruções adicionais da campanha:
-{campaign.custom_prompt or 'Nenhuma instrução específica.'}
+DIRETRIZES DE PERSONALIZAÇÃO OBRIGATÓRIAS:
+1. NÃO use frases genéricas prontas. Cada clínica deve receber uma mensagem única e personalizada.
+2. Na Mensagem 1: Apresente Carlos pelo nome de forma leve e natural, citando o nome da clínica e um detalhe da cidade ou que estava conhecendo o trabalho deles.
+3. Na Mensagem 2: Conecte a dificuldade comercial DIRETAMENTE aos tratamentos em destaque da clínica (ex: {', '.join(specialties_found[:3]) if specialties_found else 'pacientes particulares para tratamentos odontológicos'}), perguntando de forma curiosa e humilde como está a captação de pacientes para essas áreas específicas.
+4. Na Mensagem 3: Apresente a atuação com anúncios no Facebook/Instagram como uma forma prática de atrair mais pessoas da cidade interessadas exatamente nessas especialidades, fechando com convite para conversa rápida de 10 a 15 minutos sem compromisso.
 """
 
         # 3. Executa a IA com fallback automático usando o prompt mestre da automação
