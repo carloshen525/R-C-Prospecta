@@ -171,10 +171,31 @@ class CampaignExecutionEngine:
 
         now_utc = datetime.utcnow()
 
-        # 2. Busca mensagens da Parte 1 agendadas para agora ou antes
+        # 2. Verifica se o intervalo mínimo entre LEADS DIFERENTES está sendo respeitado
+        # Só bloqueia se houve um lead enviado com sucesso recentemente
+        try:
+            from app.models.setting import Setting
+            s_int = self.db.query(Setting).filter(Setting.key == "MIN_INTERVAL_BETWEEN_CONTACTS_SEC").first()
+            min_interval = int(s_int.value) if s_int and s_int.value else 180
+        except Exception:
+            min_interval = 180
+
+        last_sent_msg = self.db.query(Message).filter(
+            Message.status == "enviado",
+            Message.sent_at.isnot(None)
+        ).order_by(Message.sent_at.desc()).first()
+
+        if last_sent_msg and last_sent_msg.sent_at:
+            elapsed = (now_utc - last_sent_msg.sent_at).total_seconds()
+            if elapsed < min_interval:
+                wait_sec = int(min_interval - elapsed)
+                logger.info(f"Aguardando delay de segurança entre leads: {wait_sec}s restantes (mínimo de {min_interval}s configurado).")
+                return []
+
+        # 3. Busca mensagens de Partes pendentes agendadas
         pending_first_msgs = self.db.query(Message).join(Campaign).join(Lead).filter(
             Campaign.status == "ativa",
-            Lead.status.notin_(["nao_contatar", "respondeu", "interessado", "sem_interesse"]),
+            Lead.status.notin_(["nao_contatar", "respondeu", "interessado", "sem_interesse", "sem_whatsapp"]),
             Lead.is_eligible == True,
             Message.status.in_(["pendente", "na_fila"]),
             Message.part_number == 1,
@@ -185,33 +206,29 @@ class CampaignExecutionEngine:
         for fmsg in pending_first_msgs:
             seq_results = self.send_lead_sequence(lead_id=fmsg.lead_id, campaign_id=fmsg.campaign_id)
             results.extend(seq_results)
-
-        # 3. Dispara partes 2 ou 3 pendentes que ficaram pendentes para agora
-        remaining_pending = self.db.query(Message).join(Campaign).join(Lead).filter(
-            Campaign.status == "ativa",
-            Lead.status.notin_(["nao_contatar", "respondeu", "interessado", "sem_interesse"]),
-            Lead.is_eligible == True,
-            Message.status.in_(["pendente", "na_fila"]),
-            Message.part_number > 1,
-            Message.scheduled_for <= now_utc
-        ).order_by(Message.scheduled_for.asc()).limit(max_messages).all()
-
-        for rmsg in remaining_pending:
-            res = self.send_single_message(rmsg.id)
-            results.append(res)
+            # Se o lead foi enviado com sucesso, encerra o lote para aguardar o intervalo do próximo
+            if seq_results and any(r.get("status") == "success" for r in seq_results):
+                break
 
         # 4. Se não há mensagens prontas na fila, busca novos leads aguardando processamento
+        # Se um lead falhar ou não tiver WhatsApp, pula IMEDIATAMENTE para o próximo da fila!
         if not results:
             from app.api.v1.endpoints.automation import get_or_create_system_campaign
             system_camp = get_or_create_system_campaign(self.db)
 
-            waiting_lead = self.db.query(Lead).filter(
-                Lead.status.in_(["novo", "aguardando"]),
-                Lead.is_eligible == True,
-                Lead.phone.isnot(None)
-            ).order_by(Lead.created_at.asc()).first()
+            max_consecutive_skips = 10
+            while max_consecutive_skips > 0:
+                max_consecutive_skips -= 1
 
-            if waiting_lead:
+                waiting_lead = self.db.query(Lead).filter(
+                    Lead.status.in_(["novo", "aguardando"]),
+                    Lead.is_eligible == True,
+                    Lead.phone.isnot(None)
+                ).order_by(Lead.created_at.asc()).first()
+
+                if not waiting_lead:
+                    break
+
                 from app.services.message_generator.generator import MessageGeneratorService
                 from app.services.ai_providers.ai_service import AIService
                 ai_service = AIService(db=self.db)
@@ -220,8 +237,21 @@ class CampaignExecutionEngine:
                     generator.generate_for_lead(campaign_id=system_camp.id, lead_id=waiting_lead.id)
                     seq_res = self.send_lead_sequence(lead_id=waiting_lead.id, campaign_id=system_camp.id)
                     results.extend(seq_res)
+
+                    has_success = seq_res and any(r.get("status") == "success" for r in seq_res)
+                    if has_success:
+                        # Lead contatado com sucesso! Respeita o intervalo antes do próximo
+                        logger.info(f"Lead {waiting_lead.company_name} contatado com sucesso via WhatsApp!")
+                        break
+                    else:
+                        # Falhou (ex: telefone fixo ou sem whatsapp) -> pula IMEDIATAMENTE para o próximo
+                        logger.info(f"Lead {waiting_lead.company_name} não possui WhatsApp ou falhou. Pulando imediatamente para o próximo da fila!")
+                        continue
+
                 except Exception as gen_err:
-                    logger.error(f"Erro ao processar lead {waiting_lead.id} no ciclo automático: {gen_err}")
+                    logger.error(f"Erro ao processar lead {waiting_lead.id}: {gen_err}")
+                    waiting_lead.status = "erro"
+                    self.db.commit()
 
         return results
 
