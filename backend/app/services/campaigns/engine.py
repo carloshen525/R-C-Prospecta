@@ -285,15 +285,14 @@ class CampaignExecutionEngine:
             self.db.commit()
             return {"status": "postponed", "reason": reason, "rescheduled_for": str(msg.scheduled_for)}
 
-        # 5. Se for o primeiro contato, consome uma vaga do limite diário global
+        # 5. Se for o primeiro contato, valida se ainda há cota diária disponível
         if is_first_contact:
-            try:
-                self.increment_daily_usage_if_first_contact(lead.id)
-            except DailyLimitReachedException as limit_err:
+            can_send_contact, reason_contact = self.can_send_contact_today(is_new_contact=True)
+            if not can_send_contact:
                 next_window = get_next_allowed_window_start()
                 msg.scheduled_for = next_window.replace(tzinfo=None)
                 self.db.commit()
-                return {"status": "postponed", "reason": str(limit_err)}
+                return {"status": "postponed", "reason": reason_contact}
 
         # 6. Dispara via Evolution API
         try:
@@ -301,6 +300,13 @@ class CampaignExecutionEngine:
                 phone=lead.phone,
                 text=msg.final_content
             )
+
+            # Se o primeiro contato foi enviado com sucesso, agora sim consome a cota diária
+            if is_first_contact:
+                try:
+                    self.increment_daily_usage_if_first_contact(lead.id)
+                except Exception as usage_err:
+                    logger.warning(f"Aviso ao contabilizar uso diário: {usage_err}")
 
             # Extrai ID da mensagem da resposta da Evolution
             evo_id = (
@@ -365,6 +371,13 @@ class CampaignExecutionEngine:
                 if fresh_msg:
                     fresh_msg.status = "falhou"
                     fresh_msg.error_message = str(e)
+                    # Se o erro indicar que o número não possui WhatsApp, marca lead como sem_whatsapp
+                    err_str = str(e).lower()
+                    if "exists\":false" in err_str or "not registered" in err_str:
+                        fresh_lead = self.db.query(Lead).filter(Lead.id == fresh_msg.lead_id).first()
+                        if fresh_lead:
+                            fresh_lead.status = "sem_whatsapp"
+                            fresh_lead.is_eligible = False
                     self.db.commit()
             except Exception as inner_err:
                 logger.error(f"Erro ao salvar status de falha: {inner_err}")
