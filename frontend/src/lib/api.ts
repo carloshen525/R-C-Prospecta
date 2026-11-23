@@ -1,4 +1,19 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
+// No browser em ambiente de produção, sempre utiliza rota relativa '/api/v1'
+// para garantir que as requisições passem pelo proxy seguro do Next.js sem erro de Mixed Content ou localhost
+function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      return "/api/v1";
+    }
+  }
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+  if (envUrl && !envUrl.includes("localhost:8000")) {
+    return envUrl;
+  }
+  return "/api/v1";
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 export async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
