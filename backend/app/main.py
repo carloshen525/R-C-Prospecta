@@ -43,8 +43,29 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Inicia tarefa em segundo plano para despacho contínuo autônomo (roda a cada 60s)
+    import asyncio
+    async def continuous_dispatcher_task():
+        await asyncio.sleep(5)
+        while True:
+            try:
+                from app.database import SessionLocal
+                from app.services.campaigns.engine import CampaignExecutionEngine
+                db_loop = SessionLocal()
+                try:
+                    engine_loop = CampaignExecutionEngine(db=db_loop)
+                    engine_loop.dispatch_next_batch(max_messages=1)
+                finally:
+                    db_loop.close()
+            except Exception as loop_err:
+                logger.debug(f"Ciclo automático de verificação: {loop_err}")
+            await asyncio.sleep(60)
+
+    loop_task = asyncio.create_task(continuous_dispatcher_task())
+
     yield
 
+    loop_task.cancel()
     logger.info("Desligando Prospect AI...")
 
 app = FastAPI(
