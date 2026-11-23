@@ -483,3 +483,84 @@ def get_automation_history(limit: int = 50, db: Session = Depends(get_db)):
         })
 
     return {"total": len(history), "items": history}
+
+@router.post("/sync-snapshot")
+def sync_snapshot(payload: dict, db: Session = Depends(get_db)):
+    """Sincroniza histórico completo de leads, mensagens e métricas locais para o PostgreSQL"""
+    from datetime import date
+    from app.models.lead import Lead
+    from app.models.message import Message
+    from app.models.conversation import Conversation, ConversationEvent
+    from app.models.sending_daily_usage import SendingDailyUsage
+    from app.core.scheduler_rules import get_now_in_brazil
+
+    # 1. Sincroniza cota de hoje
+    today = get_now_in_brazil().date()
+    sent_count = payload.get("contacts_sent_today", 15)
+    usage = db.query(SendingDailyUsage).filter(SendingDailyUsage.usage_date == today).first()
+    if not usage:
+        usage = SendingDailyUsage(
+            usage_date=today,
+            contacts_sent_count=sent_count,
+            limit_max=20,
+            is_limit_reached=(sent_count >= 20)
+        )
+        db.add(usage)
+    else:
+        usage.contacts_sent_count = sent_count
+        usage.limit_max = 20
+        usage.is_limit_reached = (sent_count >= 20)
+
+    # 2. Sincroniza leads
+    leads_in = payload.get("leads", [])
+    for ld in leads_in:
+        existing = db.query(Lead).filter(Lead.phone == ld.get("phone")).first()
+        if not existing and ld.get("company_name"):
+            existing = db.query(Lead).filter(Lead.company_name == ld.get("company_name")).first()
+        
+        if existing:
+            existing.status = ld.get("status", existing.status)
+            existing.is_eligible = ld.get("is_eligible", existing.is_eligible)
+            if ld.get("website_data"):
+                existing.website_data = ld.get("website_data")
+        else:
+            new_lead = Lead(
+                company_name=ld.get("company_name"),
+                phone=ld.get("phone"),
+                raw_phone=ld.get("raw_phone"),
+                city=ld.get("city", "Ribeirão Preto"),
+                website=ld.get("website"),
+                segment=ld.get("segment", "Clínicas odontológicas"),
+                status=ld.get("status", "novo"),
+                is_eligible=ld.get("is_eligible", True),
+                website_data=ld.get("website_data")
+            )
+            db.add(new_lead)
+
+    db.commit()
+
+    # 3. Sincroniza mensagens enviadas
+    msgs_in = payload.get("messages", [])
+    for md in msgs_in:
+        lead_phone = md.get("phone")
+        target_lead = db.query(Lead).filter(Lead.phone == lead_phone).first() if lead_phone else None
+        if target_lead:
+            # Verifica se já existe mensagem similar
+            existing_msg = db.query(Message).filter(
+                Message.lead_id == target_lead.id,
+                Message.part_number == md.get("part_number")
+            ).first()
+            if not existing_msg:
+                new_msg = Message(
+                    campaign_id=1,
+                    lead_id=target_lead.id,
+                    part_number=md.get("part_number", 1),
+                    original_content=md.get("content", ""),
+                    final_content=md.get("content", ""),
+                    status=md.get("status", "enviado"),
+                    sent_at=datetime.utcnow()
+                )
+                db.add(new_msg)
+
+    db.commit()
+    return {"status": "success", "message": "Histórico sincronizado com sucesso!"}
