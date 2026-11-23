@@ -123,17 +123,56 @@ class CampaignExecutionEngine:
         """
         Envia a sequência completa de mensagens (Partes 1, 2 e 3) para o mesmo lead
         com intervalos naturais de digitação (8 a 14 segundos entre balões).
+        Garante rigorosamente que NENHUM lead receba mais de 3 mensagens na sua história.
         """
         import time
 
-        messages = self.db.query(Message).filter(
+        lead = self.db.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            return []
+
+        # 1. TRAVA ABSOLUTA: Verifica quantas mensagens já foram enviadas com sucesso para este lead
+        already_sent_count = self.db.query(Message).filter(
+            Message.lead_id == lead_id,
+            Message.status.in_(["enviado", "entregue", "lido"])
+        ).count()
+
+        if already_sent_count >= 3 or lead.status in ("contatado", "bloqueado", "sem_whatsapp", "respondeu", "interessado", "sem_interesse", "nao_contatar"):
+            logger.warning(f"[ANTI-DUPLICIDADE] Lead {lead_id} ({lead.company_name}) já possui {already_sent_count} msgs enviadas ou status={lead.status}. Cancelando pendentes.")
+            self.db.query(Message).filter(
+                Message.lead_id == lead_id,
+                Message.status.in_(["pendente", "na_fila"])
+            ).update({"status": "cancelado", "error_message": "Cancelado: Lead já recebeu o limite máximo de 3 mensagens"}, synchronize_session=False)
+            lead.status = "contatado" if already_sent_count >= 3 else lead.status
+            lead.is_eligible = False
+            self.db.commit()
+            return []
+
+        # 2. Busca mensagens pendentes e DEDUPLICA por part_number (no máximo uma para parte 1, 2 e 3)
+        pending_candidates = self.db.query(Message).filter(
             Message.lead_id == lead_id,
             Message.campaign_id == campaign_id,
             Message.status.in_(["pendente", "na_fila"])
-        ).order_by(Message.part_number.asc()).all()
+        ).order_by(Message.id.asc()).all()
+
+        seen_parts = set()
+        messages_to_send = []
+        for pmsg in pending_candidates:
+            if pmsg.part_number not in seen_parts and len(messages_to_send) + already_sent_count < 3:
+                seen_parts.add(pmsg.part_number)
+                messages_to_send.append(pmsg)
+            else:
+                # Duplicata detectada: cancela imediatamente
+                pmsg.status = "cancelado"
+                pmsg.error_message = "Cancelado: Mensagem duplicada da mesma sequência"
+
+        self.db.commit()
+
+        # Ordena estritamente por part_number (1 -> 2 -> 3)
+        messages_to_send.sort(key=lambda m: m.part_number)
 
         results = []
-        for i, msg in enumerate(messages):
+        for i, msg in enumerate(messages_to_send):
             if i > 0:
                 time.sleep(random.uniform(8.0, 14.0))
 
@@ -142,11 +181,21 @@ class CampaignExecutionEngine:
 
             if res.get("status") in ("error", "failed"):
                 # Cancela próximas partes caso uma falhe
-                for remaining in messages[i+1:]:
+                for remaining in messages_to_send[i+1:]:
                     remaining.status = "cancelado"
                     remaining.error_message = f"Cancelado: parte {msg.part_number} falhou no envio"
                 self.db.commit()
                 break
+
+        # Ao final do envio da sequência, se foram enviadas mensagens, marca o lead como contatado e inelígivel
+        total_now = self.db.query(Message).filter(
+            Message.lead_id == lead_id,
+            Message.status.in_(["enviado", "entregue", "lido"])
+        ).count()
+        if total_now >= 3:
+            lead.status = "contatado"
+            lead.is_eligible = False
+            self.db.commit()
 
         return results
 
@@ -195,7 +244,7 @@ class CampaignExecutionEngine:
         # 3. Busca mensagens de Partes pendentes agendadas
         pending_first_msgs = self.db.query(Message).join(Campaign).join(Lead).filter(
             Campaign.status == "ativa",
-            Lead.status.notin_(["nao_contatar", "respondeu", "interessado", "sem_interesse", "sem_whatsapp"]),
+            Lead.status.notin_(["contatado", "bloqueado", "nao_contatar", "respondeu", "interessado", "sem_interesse", "sem_whatsapp", "erro"]),
             Lead.is_eligible == True,
             Message.status.in_(["pendente", "na_fila"]),
             Message.part_number == 1,
@@ -279,8 +328,22 @@ class CampaignExecutionEngine:
         if campaign.status != "ativa":
             return {"status": "skipped", "message": f"Campanha {campaign.name} não está ativa ({campaign.status})"}
 
-        # 2. Verifica se o lead não respondeu nem está na lista de supressão
-        if lead.status in ("respondeu", "interessado", "sem_interesse", "nao_contatar"):
+        # 2. TRAVA ANTI-DUPLICIDADE RIGOROSA
+        # Verifica se o lead já atingiu o limite vitalício de 3 mensagens enviadas
+        total_sent_for_lead = self.db.query(Message).filter(
+            Message.lead_id == lead.id,
+            Message.status.in_(["enviado", "entregue", "lido"])
+        ).count()
+        if total_sent_for_lead >= 3:
+            msg.status = "cancelado"
+            msg.error_message = f"Cancelado: Lead já recebeu o teto de 3 mensagens ({total_sent_for_lead} enviadas)"
+            lead.status = "contatado"
+            lead.is_eligible = False
+            self.db.commit()
+            return {"status": "cancelled", "reason": msg.error_message}
+
+        # Verifica se o lead não respondeu, foi finalizado ou está na lista de supressão
+        if lead.status in ("contatado", "bloqueado", "sem_whatsapp", "respondeu", "interessado", "sem_interesse", "nao_contatar"):
             msg.status = "cancelado"
             msg.error_message = f"Envio cancelado pois o lead está em status '{lead.status}'"
             self.db.commit()
@@ -350,7 +413,10 @@ class CampaignExecutionEngine:
             msg.error_message = None
 
             # Atualiza status do lead e campaign_lead
-            if lead.status == "mensagens_geradas" or lead.status == "novo":
+            if msg.part_number == 3:
+                lead.status = "contatado"
+                lead.is_eligible = False
+            elif lead.status == "mensagens_geradas" or lead.status == "novo":
                 lead.status = "contatado"
 
             cl = self.db.query(CampaignLead).filter(

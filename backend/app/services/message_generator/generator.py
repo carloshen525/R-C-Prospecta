@@ -67,6 +67,14 @@ class MessageGeneratorService:
         if not campaign or not lead:
             raise ValueError("Campanha ou Lead não encontrado")
 
+        # TRAVA DE SEGURANÇA ABSOLUTA CONTRA DUPLICIDADE:
+        # Se o lead já foi contatado ou já possui mensagens geradas no banco, NUNCA gere novamente!
+        existing_msgs = self.db.query(Message).filter(Message.lead_id == lead.id).order_by(Message.part_number.asc()).all()
+        if existing_msgs or lead.status in ("contatado", "bloqueado", "sem_whatsapp", "respondeu", "interessado", "sem_interesse", "nao_contatar"):
+            logger.warning(f"[ANTI-DUPLICIDADE] Lead {lead.id} ({lead.company_name}) já possui {len(existing_msgs)} mensagens ou status '{lead.status}'. Geração duplicada bloqueada.")
+            existing_seq = self.db.query(GeneratedSequence).filter(GeneratedSequence.lead_id == lead.id).first()
+            return existing_seq, existing_msgs
+
         # 1. Se o lead tiver website e ainda não foi analisado, realiza a análise
         website_context = ""
         specialties_found = []

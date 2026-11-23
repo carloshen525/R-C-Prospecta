@@ -3,6 +3,7 @@ import pytest
 from app.services.campaigns.engine import CampaignExecutionEngine
 from app.models.sending_daily_usage import SendingDailyUsage
 from app.models.lead import Lead
+from app.models.campaign import Campaign
 from app.core.exceptions import DailyLimitReachedException
 from app.core.scheduler_rules import get_now_in_brazil
 
@@ -43,3 +44,39 @@ def test_same_contact_does_not_consume_second_slot(db_session):
     can_send, msg = engine.can_send_contact_today(is_new_contact=False, check_window=False)
     assert can_send is True
     assert "contato já contabilizado" in msg
+
+def test_lead_never_receives_more_than_3_messages(db_session):
+    engine = CampaignExecutionEngine(db=db_session)
+    camp = Campaign(id=1, name="Campanha Teste", status="ativa")
+    db_session.add(camp)
+    db_session.commit()
+
+    lead = Lead(
+        company_name="Clinica Teste Limite",
+        phone="+5516999990099",
+        status="contatado",
+        is_eligible=False
+    )
+    db_session.add(lead)
+    db_session.commit()
+
+    # Tenta enviar sequência para um lead que já foi contatado
+    results = engine.send_lead_sequence(lead_id=lead.id, campaign_id=1)
+    assert len(results) == 0
+
+    # Mensagens pendentes para este lead devem ser canceladas
+    from app.models.message import Message
+    msg = Message(
+        campaign_id=1,
+        lead_id=lead.id,
+        part_number=1,
+        original_content="Teste",
+        final_content="Teste",
+        status="pendente"
+    )
+    db_session.add(msg)
+    db_session.commit()
+
+    res = engine.send_single_message(msg.id)
+    assert res.get("status") == "cancelled"
+    assert msg.status == "cancelado"
