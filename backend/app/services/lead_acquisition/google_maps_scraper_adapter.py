@@ -43,7 +43,10 @@ class GoogleMapsScraperAdapter:
                     args=[
                         "--disable-gpu",
                         "--no-sandbox",
+                        "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage",
+                        "--no-zygote",
+                        "--single-process",
                         "--disable-blink-features=AutomationControlled"
                     ]
                 )
