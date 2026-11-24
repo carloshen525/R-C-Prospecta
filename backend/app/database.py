@@ -12,7 +12,14 @@ def get_engine():
         try:
             pg_engine = create_engine(
                 settings.DATABASE_URL,
-                pool_pre_ping=True
+                pool_pre_ping=True,
+                pool_recycle=60,
+                connect_args={
+                    "keepalives": 1,
+                    "keepalives_idle": 15,
+                    "keepalives_interval": 5,
+                    "keepalives_count": 5
+                }
             )
             with pg_engine.connect() as conn:
                 pass

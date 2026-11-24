@@ -53,9 +53,29 @@ def create_extraction_job(
 
     return job
 
+def _auto_recover_job_if_possible(job: ExtractionJob, db: Session):
+    """Auto-recupera jobs que concluíram a busca mas tiveram queda de conexão no momento do commit"""
+    if job and job.status == "failed" and job.error_log and "'status': 'completed'" in job.error_log and not job.extracted_items:
+        try:
+            import re, ast
+            m = re.search(r"'extracted_items':\s*Json\((\[.*?\])\)", job.error_log, re.DOTALL)
+            if m:
+                items = ast.literal_eval(m.group(1))
+                job.extracted_items = items
+                job.found_count = len(items)
+                job.processed_count = len(items)
+                job.status = "completed"
+                job.error_log = None
+                db.commit()
+                db.refresh(job)
+        except Exception as rec_err:
+            logger.debug(f"Falha na auto-recuperação do job {job.id}: {rec_err}")
+
 @router.get("", response_model=List[ExtractionJobResponse])
 def list_extraction_jobs(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     jobs = db.query(ExtractionJob).order_by(ExtractionJob.created_at.desc()).offset(skip).limit(limit).all()
+    for j in jobs:
+        _auto_recover_job_if_possible(j, db)
     return jobs
 
 @router.get("/{job_id}", response_model=ExtractionJobResponse)
@@ -63,6 +83,7 @@ def get_extraction_job(job_id: int, db: Session = Depends(get_db)):
     job = db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Tarefa de extração não encontrada")
+    _auto_recover_job_if_possible(job, db)
     return job
 
 @router.post("/{job_id}/import")

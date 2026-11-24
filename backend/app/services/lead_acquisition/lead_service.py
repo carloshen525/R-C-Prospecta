@@ -184,6 +184,17 @@ class LeadAcquisitionService:
                     "lead_id": None
                 })
 
+            # Garante que a sessão com o banco de dados esteja ativa após a extração
+            try:
+                self.db.rollback()
+            except Exception:
+                from app.database import SessionLocal
+                self.db = SessionLocal()
+
+            job = self.db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
+            if not job:
+                return None
+
             job.extracted_items = items
             job.found_count = len(items)
             job.processed_count = len(items)
@@ -208,14 +219,42 @@ class LeadAcquisitionService:
             else:
                 job.error_log = None
 
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_err:
+                logger.warning(f"Tentativa 1 de commit do job {job_id} falhou ({commit_err}). Tentando com nova sessão...")
+                from app.database import SessionLocal
+                fresh_db = SessionLocal()
+                fresh_job = fresh_db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
+                if fresh_job:
+                    fresh_job.extracted_items = items
+                    fresh_job.found_count = len(items)
+                    fresh_job.processed_count = len(items)
+                    fresh_job.execution_time_seconds = round(time.time() - start_time, 2)
+                    fresh_job.status = "completed"
+                    fresh_job.error_log = None
+                    fresh_db.commit()
+                    fresh_db.close()
 
         except Exception as job_err:
-            self.db.rollback()
-            job.status = "failed"
-            job.error_log = str(job_err)
-            job.execution_time_seconds = round(time.time() - start_time, 2)
-            self.db.commit()
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+            
+            from app.database import SessionLocal
+            fresh_db = SessionLocal()
+            try:
+                fresh_job = fresh_db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
+                if fresh_job:
+                    fresh_job.status = "failed"
+                    fresh_job.error_log = str(job_err)
+                    fresh_job.execution_time_seconds = round(time.time() - start_time, 2)
+                    fresh_db.commit()
+            except Exception:
+                pass
+            finally:
+                fresh_db.close()
             logger.error(f"Falha na extração job {job_id}: {job_err}")
 
         return job
