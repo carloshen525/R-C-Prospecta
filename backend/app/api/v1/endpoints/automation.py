@@ -494,6 +494,16 @@ def sync_snapshot(payload: dict, db: Session = Depends(get_db)):
     from app.models.sending_daily_usage import SendingDailyUsage
     from app.core.scheduler_rules import get_now_in_brazil
 
+    # 0. Garante que as colunas ausentes em extraction_jobs existam no banco
+    try:
+        from sqlalchemy import text
+        db.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'google_scraper'"))
+        db.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS auto_import BOOLEAN DEFAULT FALSE"))
+        db.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS extracted_items JSONB"))
+        db.commit()
+    except Exception as col_e:
+        logger.debug(f"Migração de colunas extraction_jobs: {col_e}")
+
     # 1. Sincroniza cota de hoje
     today = get_now_in_brazil().date()
     sent_count = payload.get("contacts_sent_today", 15)

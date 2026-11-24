@@ -11,11 +11,24 @@ from app.models.user import User
 from app.models.lead_source import LeadSource
 from app.core.security import get_password_hash
 
+import app.models
+from sqlalchemy import text
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Inicialização: cria tabelas no banco de dados
     logger.info("Inicializando Prospect AI - Criando schema no banco se necessário...")
     Base.metadata.create_all(bind=engine)
+
+    # Garante colunas que possam faltar em bancos PostgreSQL já inicializados
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'google_scraper'"))
+            conn.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS auto_import BOOLEAN DEFAULT FALSE"))
+            conn.execute(text("ALTER TABLE extraction_jobs ADD COLUMN IF NOT EXISTS extracted_items JSONB"))
+            conn.commit()
+    except Exception as col_err:
+        logger.debug(f"Verificação de colunas extraction_jobs: {col_err}")
 
     # Popula usuário admin padrão e fontes iniciais caso o banco esteja novo
     db = SessionLocal()
@@ -90,6 +103,14 @@ async def prospect_ai_exception_handler(request: Request, exc: ProspectAIExcepti
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"error": exc.__class__.__name__, "message": exc.message, "details": exc.details}
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Erro 500 não tratado em {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": exc.__class__.__name__, "message": str(exc), "detail": str(exc)}
     )
 
 @app.get("/health", tags=["Health"])
